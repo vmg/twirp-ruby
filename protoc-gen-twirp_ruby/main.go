@@ -68,7 +68,14 @@ func (g *generator) generateRubyCode(file *descriptor.FileDescriptorProto, pbFil
 
 	indent := indentation(0)
 	pkgName := file.GetPackage()
-	modules := splitRubyConstants(pkgName)
+
+	var modules []string
+	if file.Options.RubyPackage != nil {
+		modules = strings.Split(*file.Options.RubyPackage, "::")
+	} else {
+		modules = splitRubyConstants(pkgName)
+	}
+
 	for _, m := range modules {
 		print(b, "%smodule %s", indent, m)
 		indent += 1
