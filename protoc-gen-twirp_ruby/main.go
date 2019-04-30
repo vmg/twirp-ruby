@@ -27,6 +27,8 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/protoc-gen-go/descriptor"
 	plugin "github.com/golang/protobuf/protoc-gen-go/plugin"
+
+	"github.com/twitchtv/twirp-ruby/protoc-gen-twirp_ruby/typemap"
 )
 
 func main() {
@@ -39,12 +41,35 @@ func main() {
 type generator struct {
 	version string
 	genReq  *plugin.CodeGeneratorRequest
+
+	reg                 *typemap.Registry
+	fileToGoPackageName map[*descriptor.FileDescriptorProto]string
+}
+
+func fileDescSliceContains(slice []*descriptor.FileDescriptorProto, f *descriptor.FileDescriptorProto) bool {
+	for _, sf := range slice {
+		if f == sf {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *generator) Generate() *plugin.CodeGeneratorResponse {
-	resp := new(plugin.CodeGeneratorResponse)
+	g.reg = typemap.New(g.genReq.ProtoFile)
 
-	for _, f := range g.protoFilesToGenerate() {
+	resp := new(plugin.CodeGeneratorResponse)
+	genFiles := g.protoFilesToGenerate()
+
+	for _, f := range g.genReq.ProtoFile {
+		if fileDescSliceContains(genFiles, f) {
+			g.fileToGoPackageName[f] = ""
+		} else {
+			g.fileToGoPackageName[f] = f.GetPackage()
+		}
+	}
+
+	for _, f := range genFiles {
 		twirpFileName := noExtension(filePath(f)) + "_twirp.rb"             // e.g. "hello_world/service_twirp.rb"
 		pbFileRelativePath := noExtension(onlyBase(filePath(f))) + "_pb.rb" // e.g. "service_pb.rb"
 
@@ -91,8 +116,8 @@ func (g *generator) generateRubyCode(file *descriptor.FileDescriptorProto, pbFil
 		print(b, "%s  service '%s'", indent, svcName)
 		for _, method := range service.GetMethod() {
 			rpcName := method.GetName()
-			rpcInput := toRubyType(method.GetInputType(), modules)
-			rpcOutput := toRubyType(method.GetOutputType(), modules)
+			rpcInput := g.toRubyType(method.GetInputType())
+			rpcOutput := g.toRubyType(method.GetOutputType())
 			print(b, "%s  rpc :%s, %s, %s, :ruby_method => :%s",
 				indent, rpcName, rpcInput, rpcOutput, snakeCase(rpcName))
 		}
@@ -196,24 +221,23 @@ func writeGenResponse(w io.Writer, resp *plugin.CodeGeneratorResponse) {
 // e.g. toRubyType(".foo.my_message", []string{}) => "Foo::MyMessage"
 // e.g. toRubyType(".foo.my_message", []string{"Foo"}) => "MyMessage"
 // e.g. toRubyType("google.protobuf.Empty", []string{"Foo"}) => "Google::Protobuf::Empty"
-func toRubyType(protoType string, currentModules []string) string {
-	rubyConsts := splitRubyConstants(protoType)
-	if len(rubyConsts) == 0 {
-		return ""
-	}
-	rubyType := strings.Join(rubyConsts, "::")
-
-	if len(rubyType) > 2 && rubyType[0:2] == "::" {
-		rubyType = rubyType[2:len(rubyType)] // Remove leading ::
+func (g *generator) toRubyType(protoType string) string {
+	def := g.reg.MessageDefinition(protoType)
+	if def == nil {
+		panic("could not find message for " + protoType)
 	}
 
-	// Remove leading modules if they are the same as in the current context
-	currentModulesConst := strings.Join(currentModules, "::") + "::"
-	if strings.HasPrefix(rubyType, currentModulesConst) {
-		rubyType = rubyType[len(currentModulesConst):len(rubyType)]
+	var prefix string
+	if pkg := g.fileToGoPackageName[def.File]; pkg != "" {
+		prefix = pkg + "::"
 	}
 
-	return rubyType
+	var name string
+	for _, parent := range def.Lineage() {
+		name += camelCase(parent.Descriptor.GetName()) + "::"
+	}
+	name += camelCase(def.Descriptor.GetName())
+	return prefix + name
 }
 
 // splitRubyConstants converts a namespaced protobuf type (package name or mesasge)
